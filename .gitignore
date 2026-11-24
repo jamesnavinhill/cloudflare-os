@@ -35,6 +35,7 @@ packages/api-cli/generated/
 # Site-specific deployment configs.
 wrangler.prod.jsonc
 wrangler.staging.jsonc
+wrangler.yrka.jsonc
 
 # Site-specific dev server configs.
 wrangler.dev.jsonc
