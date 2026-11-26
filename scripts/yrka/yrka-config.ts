@@ -347,6 +347,21 @@ export function buildYrkaConfigs({
         // customer instances ($PUBLIC_BASE_URL/gatekeeper/<short>).
         BASE_URL: `${baseUrl}/gatekeeper/${gatekeeperShortName(pkg.name)}`,
       };
+      if (pkg.name === "gatekeeper-mcp-portal") {
+        // The deployment's own Cloudflare MCP Server Portal (mcp.yrka.io, Access app type
+        // mcp_portal) fronts the agency MCP gateway (tools.yrka.io, registered in the portal as
+        // server "tools" with its bearer credential held by the portal). Auth stays the default
+        // OAuth mode: the portal's authorization server is Cloudflare Access (authorization_code
+        // + refresh_token only, no client_credentials, no static bearer at the MCP layer), so
+        // each OS account connects with the user's own Access identity — the one front door.
+        // MCP_PORTAL_AUTH/MCP_PORTAL_TOKEN are deliberately NOT set. Set at the config layer
+        // 2026-11-26 as part of the MCP consolidation (agency docs/mcp-tool-map.md).
+        config.vars = {
+          ...config.vars,
+          MCP_PORTAL_URL: process.env.YRKA_MCP_PORTAL_URL ?? "https://mcp.yrka.io",
+          MCP_PORTAL_NAME: process.env.YRKA_MCP_PORTAL_NAME ?? "yrka tools (agency gateway)",
+        };
+      }
     } else if (pkg.name === "workshop-backend") {
       // Injected rather than read from wrangler.jsonc, mirroring what manifest-lib.ts hardcodes
       // for every deployed backend: webFetch's document-to-Markdown conversion depends on it.
