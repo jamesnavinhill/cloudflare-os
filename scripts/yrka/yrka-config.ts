@@ -50,8 +50,12 @@ export interface YrkaConfig extends WranglerConfig {
   account_id?: string;
   /** Whether the worker gets a workers.dev hostname. Only the router does. */
   workers_dev?: boolean;
-  /** Zone routes. Deleted: the YRKA origin is the router's workers.dev URL, no zone involved. */
-  routes?: unknown[];
+  /**
+   * Routes. Deleted on every worker but the router when the origin is a custom domain: a
+   * `custom_domain` route is how wrangler attaches YRKA_PUBLIC_BASE_URL's hostname to the router,
+   * which otherwise no generated config would own (see customDomainForYrkaOrigin).
+   */
+  routes?: { pattern: string; custom_domain: boolean }[];
   /** Workers AI binding, injected for the backend (as the release manifest does for every deploy). */
   ai?: BindingDecl;
 }
@@ -177,12 +181,28 @@ export function resolveYrkaOrigin({
         "reads from the Cloudflare API when it runs).");
   }
   // YRKA_WORKERS_DEV_HOST carries what the API's subdomain endpoint returns — the bare account
-  // subdomain, no ".workers.dev" — so the suffix is appended here rather than trusted from
-  // the value. A host that already ends in .workers.dev passes through unchanged.
+  // subdomain, no ".workers.dev" — so the suffix is appended here rather than trusted from the
+  // value. A host that already ends in .workers.dev passes through unchanged.
   const host = workersDevHost.endsWith(".workers.dev")
       ? workersDevHost
       : `${workersDevHost}.workers.dev`;
   return `https://router.${host}`;
+}
+
+/**
+ * The custom-domain hostname the router serves alongside its workers.dev URL, or null. Set only
+ * when YRKA_PUBLIC_BASE_URL names a zone hostname (not a workers.dev one): the attachment is made
+ * by `wrangler deploy` from the route this generator writes for the router, so the origin the
+ * other vars carry and the hostname traffic actually reaches can never drift apart. The DNS
+ * record and any prior attachment (another worker's custom domain) are arranged out of band —
+ * wrangler refuses to attach a hostname that is still attached elsewhere.
+ */
+export function customDomainForYrkaOrigin({
+  publicBaseUrl = process.env.YRKA_PUBLIC_BASE_URL,
+}: { publicBaseUrl?: string } = {}): string | null {
+  if (!publicBaseUrl) return null;
+  const hostname = new URL(publicBaseUrl).hostname;
+  return hostname.endsWith(".workers.dev") ? null : hostname;
 }
 
 /**
@@ -264,7 +284,7 @@ function routerGatekeeperServices(gatekeepers: readonly string[]): ServiceBindin
  * accept exactly that because they are throwaways; this instance is not).
  */
 export function buildYrkaConfigs({
-  packages, accountId, baseUrl, gatekeepers, kvIds, r2Names,
+  packages, accountId, baseUrl, gatekeepers, kvIds, r2Names, customDomainHostname,
 }: {
   packages: readonly DeployablePackage[];
   accountId: string;
@@ -272,6 +292,7 @@ export function buildYrkaConfigs({
   gatekeepers: readonly string[];
   kvIds: Record<string, string>;
   r2Names: Record<string, string>;
+  customDomainHostname?: string | null;
 }): Map<string, YrkaConfig> {
   const internal = internalWorkersFor(packages, gatekeepers);
   const chosen = new Set([...internal, ...gatekeepers, "workshop-backend", "router"]);
@@ -291,12 +312,20 @@ export function buildYrkaConfigs({
     // Stated rather than left to defaults, so reachability never depends on a default changing
     // or on what the dashboard was last toggled to — a deploy overwrites the dashboard value
     // either way. Only the router is public; everything else is reached over service bindings.
+    // The router keeps its workers.dev URL when a custom domain is attached, so the URL the
+    // deployment was first reached at never breaks.
     Object.assign(config, {
       name: pkg.name,
       account_id: accountId,
       workers_dev: pkg.name === "router",
     });
-    delete config.routes;
+    // The router owns the custom domain (its route attaches the hostname to the router); every
+    // other worker stays hostname-less, reached only through service bindings.
+    if (pkg.name === "router" && customDomainHostname) {
+      config.routes = [{ pattern: customDomainHostname, custom_domain: true }];
+    } else {
+      delete config.routes;
+    }
 
     // Concrete resource ids: binding-only entries are for wrangler to provision, which is what
     // the preview baselines want and this instance does not (see buildYrkaConfigs doc comment).

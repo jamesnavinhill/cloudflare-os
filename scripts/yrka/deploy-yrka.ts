@@ -33,8 +33,8 @@ import { join } from "node:path";
 import { isGatekeeperPackage, readDeployablePackages, type DeployablePackage } from "../release/manifest-lib.ts";
 import {
   PACKAGES_DIR, ROOT, YRKA_CONFIG_NAME, buildYrkaConfigs,
-  internalWorkersFor, resolveYrkaGatekeepers, resolveYrkaOrigin, resolveYrkaTarget,
-  yrkaResourcePlan, writeYrkaConfig, type YrkaConfig,
+  customDomainForYrkaOrigin, internalWorkersFor, resolveYrkaGatekeepers, resolveYrkaOrigin,
+  resolveYrkaTarget, yrkaResourcePlan, writeYrkaConfig, type YrkaConfig,
 } from "./yrka-config.ts";
 
 type Command = "plan" | "config" | "deploy" | "verify";
@@ -189,6 +189,11 @@ function backendSecrets({ admins = process.env.YRKA_ADMINS }): Record<string, st
   return secrets;
 }
 
+/** Whether this deployment authenticates via Cloudflare Access (the backend secret pair set). */
+function cfAccessMode(): boolean {
+  return !!(process.env.YRKA_CF_ACCESS_AUD?.trim() && process.env.YRKA_CF_ACCESS_ISS?.trim());
+}
+
 /**
  * One OAuth gatekeeper's secrets, from YRKA_<VENDOR>_CLIENT_ID and YRKA_<VENDOR>_CLIENT_SECRET
  * (vendor = the package name minus "gatekeeper-", uppercase, - -> _; e.g. YRKA_MCP_PORTAL_*).
@@ -228,6 +233,8 @@ function gatekeeperSecrets(pkgName: string): Record<string, string> | undefined 
 interface Resolved {
   accountId: string;
   baseUrl: string;
+  /** The custom-domain hostname the router serves, when YRKA_PUBLIC_BASE_URL names one. */
+  customDomain: string | null;
   packages: DeployablePackage[];
   gatekeepers: string[];
   internal: string[];
@@ -250,7 +257,12 @@ async function resolveDeployment(): Promise<Resolved> {
     const host = await fetchWorkersDevHost(accountId);
     baseUrl = `https://router.${host}`;
   }
-  return { accountId, baseUrl, packages, gatekeepers, internal, workers };
+  const customDomain = customDomainForYrkaOrigin();
+  if (customDomain && new URL(baseUrl).hostname !== customDomain) {
+    throw new Error(`YRKA_PUBLIC_BASE_URL is inconsistent: the origin is ${baseUrl} but its ` +
+        `hostname is not the custom domain ${customDomain}.`);
+  }
+  return { accountId, baseUrl, customDomain, packages, gatekeepers, internal, workers };
 }
 
 /** Generate and write every chosen worker's wrangler.yrka.jsonc. */
@@ -262,6 +274,7 @@ async function writeConfigs(resolved: Resolved, resources: ProvisionedResources)
     gatekeepers: resolved.gatekeepers,
     kvIds: resources.kvIds,
     r2Names: resources.r2Names,
+    customDomainHostname: resolved.customDomain,
   });
   for (const pkg of resolved.packages) {
     const config = configs.get(pkg.name);
@@ -279,15 +292,19 @@ function assertSecretsReady(resolved: Resolved): void {
 }
 
 // The frontend's auth mode is a build-time flag (workshop-frontend/src/useAuth.ts): a build
-// with VITE_CF_ACCESS_MODE=true serves a password form the backend then rejects. This
-// deployment authenticates with username/password by default, so the flag is pinned false
-// rather than inherited — the mirror image of the preview build pinning it true.
+// with VITE_CF_ACCESS_MODE=true has no local login — the SPA authenticates through the backend's
+// CF Access JWT check, which rejects every password. The flag must match what the backend is
+// deployed with (the YRKA_CF_ACCESS_AUD/ISS pair): a frontend built for passwords on an
+// Access-mode backend serves a login form the backend refuses every password from, and the
+// mirror image locks an Access-mode frontend out of a password-mode backend.
 async function buildWorkspace(skipBuild: boolean): Promise<void> {
   if (skipBuild) {
     console.log("--skip-build: reusing the existing build");
     return;
   }
-  const result = await run("pnpm", ["run", "build"], { cwd: ROOT, env: { ...process.env, VITE_CF_ACCESS_MODE: "false" } });
+  const accessMode = cfAccessMode() ? "true" : "false";
+  const result = await run("pnpm", ["run", "build"],
+      { cwd: ROOT, env: { ...process.env, VITE_CF_ACCESS_MODE: accessMode } });
   if (result.status !== 0) throw new Error(`pnpm run build failed with exit code ${result.status}`);
 }
 
@@ -335,9 +352,14 @@ async function plan(): Promise<void> {
   const { kvTitles, r2Names } = yrkaResourcePlan([...internal, ...gatekeepers, "workshop-backend", "router"]);
   console.log(`plan for the YRKA deployment (account ${accountId}):`);
   console.log(`  origin: ${process.env.YRKA_PUBLIC_BASE_URL ?? "https://router.<workers.dev subdomain>"}`);
+  const customDomain = customDomainForYrkaOrigin();
+  if (customDomain) {
+    console.log(`  custom domain: ${customDomain} — the router attaches it (route) and keeps ` +
+        "its workers.dev URL; any prior attachment on another worker must be detached first");
+  }
   console.log(`  tier 1 (internal): ${internal.join(", ") || "none"}`);
   console.log(`  tier 2 (gatekeepers): ${gatekeepers.join(", ")}`);
-  console.log(`  tier 3: workshop-backend — secrets: ADMINS${process.env.YRKA_CF_ACCESS_AUD ? ", CF_ACCESS_AUD, CF_ACCESS_ISS" : ""}`);
+  console.log(`  tier 3: workshop-backend — secrets: ADMINS${process.env.YRKA_CF_ACCESS_AUD ? ", CF_ACCESS_AUD, CF_ACCESS_ISS" : ""}${process.env.YRKA_CF_ACCESS_AUD ? ` (auth mode: Cloudflare Access; the frontend builds with VITE_CF_ACCESS_MODE=true)` : ""}`);
   for (const name of gatekeepers) {
     const secrets = gatekeeperSecrets(name);
     console.log(`    ${name}${secrets ? ` — secrets: ${Object.keys(secrets).join(", ")}` : ""}`);
@@ -366,14 +388,38 @@ async function config(): Promise<void> {
 }
 
 async function verify(): Promise<void> {
-  const { baseUrl } = await resolveDeployment();
-  const frontend = await fetch(baseUrl, { redirect: "manual" });
-  console.log(`GET ${baseUrl} -> ${frontend.status}`);
-  const api = await fetch(`${baseUrl}/api`, { redirect: "manual" });
-  console.log(`GET ${baseUrl}/api -> ${api.status}`);
-  if (!frontend.ok) throw new Error("The router did not serve the frontend.");
-  // Any non-5xx from /api proves the router -> backend service binding chain answers.
+  const resolved = await resolveDeployment();
+  const accessMode = cfAccessMode();
+  const frontend = await fetch(resolved.baseUrl, { redirect: "manual" });
+  console.log(`GET ${resolved.baseUrl} -> ${frontend.status}`);
+  if (accessMode) {
+    // Behind a Cloudflare Access application an anonymous request never reaches the Workshop:
+    // the gate answers with a redirect to the team's login. That redirect IS the proof the
+    // origin is gated (the bare Workshop or an open signup page would be a misconfiguration);
+    // the authenticated chain is proven out of band, with an Access service token.
+    const location = frontend.headers.get("location") ?? "";
+    if (frontend.status >= 300 && frontend.status < 400 && location.includes("cloudflareaccess.com")) {
+      console.log("  the Access gate fronts the origin (login redirect).");
+    } else {
+      throw new Error("Access mode is configured but the origin is not behind the Access gate.");
+    }
+  } else {
+    if (!frontend.ok) throw new Error("The router did not serve the frontend.");
+  }
+  const api = await fetch(`${resolved.baseUrl}/api`, { redirect: "manual" });
+  console.log(`GET ${resolved.baseUrl}/api -> ${api.status}`);
+  // Any non-5xx from /api proves the router -> backend service binding chain answers — in
+  // Access mode the gate's redirect for an anonymous request, or the backend itself otherwise.
   if (api.status >= 500) throw new Error("The backend answered with a server error.");
+  if (resolved.customDomain) {
+    // The router keeps its workers.dev URL when a custom domain is attached; a custom-domain
+    // deployment must leave it reachable (it is the address the instance was first deployed at,
+    // and the one this pipeline derives when YRKA_PUBLIC_BASE_URL is unset).
+    const host = await fetchWorkersDevHost(resolved.accountId);
+    const workersDev = await fetch(`https://router.${host}`, { redirect: "manual" });
+    console.log(`GET https://router.${host} -> ${workersDev.status}`);
+    if (!workersDev.ok) throw new Error("The router's workers.dev origin stopped serving.");
+  }
   console.log("The instance answers end to end.");
 }
 
