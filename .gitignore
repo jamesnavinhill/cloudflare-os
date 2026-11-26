@@ -36,6 +36,10 @@ packages/api-cli/generated/
 wrangler.prod.jsonc
 wrangler.staging.jsonc
 wrangler.yrka.jsonc
+# The filled YRKA deploy env (shape: scripts/yrka/yrka.example.env). The bare `.env`
+# pattern below only matches files named exactly `.env`, so without this line the
+# filled copy would sit untracked and committable.
+scripts/yrka/yrka.env
 
 # Site-specific dev server configs.
 wrangler.dev.jsonc

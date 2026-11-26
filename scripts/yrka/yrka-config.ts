@@ -176,7 +176,13 @@ export function resolveYrkaOrigin({
         "YRKA_WORKERS_DEV_HOST (the account's workers.dev subdomain, which deploy-yrka.ts " +
         "reads from the Cloudflare API when it runs).");
   }
-  return `https://router.${workersDevHost}`;
+  // YRKA_WORKERS_DEV_HOST carries what the API's subdomain endpoint returns — the bare account
+  // subdomain, no ".workers.dev" — so the suffix is appended here rather than trusted from
+  // the value. A host that already ends in .workers.dev passes through unchanged.
+  const host = workersDevHost.endsWith(".workers.dev")
+      ? workersDevHost
+      : `${workersDevHost}.workers.dev`;
+  return `https://router.${host}`;
 }
 
 /**

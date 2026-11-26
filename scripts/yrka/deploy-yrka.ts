@@ -107,7 +107,13 @@ async function fetchWorkersDevHost(accountId: string): Promise<string> {
     throw new Error("The account's workers.dev subdomain is missing or disabled; set " +
         "YRKA_PUBLIC_BASE_URL to a custom domain on the router instead.");
   }
-  return subdomain.subdomain;
+  // The API returns the bare account subdomain (here: "jamie-5fd"), not the workers.dev host,
+  // so the router's URL is https://router.<subdomain>.workers.dev — the suffix must be added or
+  // every deployed origin var (PUBLIC_BASE_URL, gatekeeper BASE_URLs, context sharingDomain)
+  // points at a hostname that does not resolve. Tolerate a value already carrying the suffix.
+  return subdomain.subdomain.endsWith(".workers.dev")
+      ? subdomain.subdomain
+      : `${subdomain.subdomain}.workers.dev`;
 }
 
 interface ProvisionedResources { kvIds: Record<string, string>; r2Names: Record<string, string> }
