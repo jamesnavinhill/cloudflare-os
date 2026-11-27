@@ -5,6 +5,10 @@ declare namespace Cloudflare {
     BASE_URL?: string;
     MCP_ALLOW_INSECURE?: string;
     MCP_CLIENT_NAME?: string;
+    MCP_SERVER_URL?: string;
+    MCP_SERVER_NAME?: string;
+    MCP_SERVER_AUTH?: string;
+    MCP_SERVER_TOKEN?: string;
   }
 
   interface GlobalProps {

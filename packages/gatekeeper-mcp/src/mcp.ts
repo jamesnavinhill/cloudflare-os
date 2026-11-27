@@ -65,6 +65,13 @@ import {
   type McpGatekeeperUserProps,
 } from "@gadgets/mcp-shared/user";
 import { connectFormHtml } from "./connect-form.js";
+import {
+  configuredResource,
+  configuredServer,
+  readServerConfig,
+  serverAuthRequiresReconnect,
+  serverTokenFor,
+} from "./config.js";
 import { serverIdFromEndpoint } from "./server-id.js";
 import { assertOwnServerSubresources, serverSubresourceId } from "./server-subresources.js";
 import { mcpResourceFor, mcpResources } from "./resources.js";
@@ -158,6 +165,16 @@ async function continueConnect(
       provenance: "user",
       auth: "oauth",
     };
+
+    // A submission naming the deployment's configured server connects that server as what it
+    // is -- deployment-provenance, configured name and auth -- never as a user endpoint
+    // guessed to be OAuth. A Bearer-only gateway (this deployment's own) cannot answer an
+    // OAuth discovery flow, so the guess would strand the connect at a 401 with nowhere to
+    // go; the configured record is also what lets `staticToken` present the deployment's key.
+    const serverConfig = readServerConfig(env);
+    if (serverConfig && sameEndpoint(validated.url, serverConfig.endpoint)) {
+      target = configuredServer(serverConfig);
+    }
   }
 
   let outcome: ConnectOutcome;
@@ -207,7 +224,9 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
-    return mcpResources(fetchOptions(this.env).allowInsecure === true);
+    const resources = mcpResources(fetchOptions(this.env).allowInsecure === true);
+    const config = readServerConfig(this.env);
+    return config ? [configuredResource(config), ...resources] : resources;
   }
 
   async getTypeScriptTypes(): Promise<string> {
@@ -236,6 +255,15 @@ export class McpAccount extends McpAccountBase<Env> {
   protected mintAccount(): Fetcher<GatekeeperUser> {
     const props: McpGatekeeperUserProps = { accountObjectId: this.ctx.id.toString() };
     return this.ctx.exports.GatekeeperUserImpl({ props });
+  }
+
+  /**
+   * The deployment's preissued token, when this account's server is the deployment's
+   * configured one. `serverTokenFor` scopes it to the configured endpoint, so a
+   * user-connected server never receives it.
+   */
+  protected override staticToken(server: ConnectedServer): string | null {
+    return serverTokenFor(this.env, server.endpoint);
   }
 
   /**
@@ -269,7 +297,9 @@ export class GatekeeperUserImpl
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
-    return mcpResources(fetchOptions(this.env).allowInsecure === true);
+    const resources = mcpResources(fetchOptions(this.env).allowInsecure === true);
+    const config = readServerConfig(this.env);
+    return config ? [configuredResource(config), ...resources] : resources;
   }
 
   async getGatekeeperClassFor(url: string): Promise<{
@@ -277,6 +307,27 @@ export class GatekeeperUserImpl
     resource: SupportedResource;
   }> {
     const server = await this.#account().getServer();
+
+    // A deployment-configured server is the deployment's choice, not the account's: if the
+    // deployment has since repointed or re-authed it, this account must reconnect rather than
+    // quietly keep calling the old endpoint with the old auth (the same rule the MCP Server
+    // Portals connector applies to its configured endpoint). User-connected servers are
+    // untouched: their endpoint and credentials are the account's own.
+    if (server.provenance === "deployment") {
+      const config = readServerConfig(this.env);
+      if (!config) {
+        throw new Error(
+          "This deployment no longer configures an MCP server. Reconnect the account.");
+      }
+      if (!sameEndpoint(server.endpoint, config.endpoint)) {
+        throw new Error(
+          `This connection is for ${hostOf(server.endpoint)}, but this deployment's MCP ` +
+          `server is now ${hostOf(config.endpoint)}. Reconnect the account.`);
+      }
+      if (serverAuthRequiresReconnect(server.auth, config.auth)) {
+        throw new Error("This deployment's MCP server authentication changed. Reconnect the account.");
+      }
+    }
 
     // The account is bound to one endpoint, so a resource URL naming anything else is not this
     // account's to grant, and the protocol-specific resource pattern matches any URL so this is the whole

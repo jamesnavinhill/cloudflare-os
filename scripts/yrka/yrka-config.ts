@@ -347,23 +347,22 @@ export function buildYrkaConfigs({
         // customer instances ($PUBLIC_BASE_URL/gatekeeper/<short>).
         BASE_URL: `${baseUrl}/gatekeeper/${gatekeeperShortName(pkg.name)}`,
       };
-      if (pkg.name === "gatekeeper-mcp-portal") {
-        // The deployment's own Cloudflare MCP Server Portal (mcp.yrka.io, Access app type
-        // mcp_portal) fronts the agency MCP gateway (tools.yrka.io, registered in the portal as
-        // server "tools" with its bearer credential held by the portal). Auth stays the default
-        // OAuth mode: the portal's authorization server is Cloudflare Access (authorization_code
-        // + refresh_token only, no client_credentials, no static bearer at the MCP layer), so
-        // each OS account connects with the user's own Access identity — the one front door.
-        // MCP_PORTAL_AUTH/MCP_PORTAL_TOKEN are deliberately NOT set. Set at the config layer
-        // 2026-11-26 as part of the MCP consolidation (agency docs/mcp-tool-map.md).
-        // The URL must be the portal's full MCP endpoint, /mcp included: the account code
-        // hands the endpoint to the MCP client verbatim, and the portal serves nothing at
-        // its root — POST initialize to https://mcp.yrka.io/ returns 404 (verified live
-        // 2026-11-27; /mcp reaches the portal's MCP layer and answers 401 pre-auth).
+      if (pkg.name === "gatekeeper-mcp") {
+        // The deployment's ONE MCP gateway: the agency tools gateway at tools.yrka.io/mcp,
+        // the same endpoint and the same Bearer credential every other environment uses.
+        // gatekeeper-mcp connects it as a deployment-configured server (auth "token": the
+        // credential is the worker's MCP_SERVER_TOKEN secret, set outside this config and
+        // never a var; its value is the gateway's long-standing master key from the vault,
+        // project agency / AGENCY_TOOLS_TOKEN). No portal, no OAuth: the gateway has no
+        // OAuth to discover, and a portal in front of it was tried on 2026-11-26/27 and
+        // removed the same week at the owner's direction — one gateway, one address.
+        // gatekeeper-mcp-portal is deliberately left unconfigured (it advertises nothing
+        // and the Workshop hides it).
         config.vars = {
           ...config.vars,
-          MCP_PORTAL_URL: process.env.YRKA_MCP_PORTAL_URL ?? "https://mcp.yrka.io/mcp",
-          MCP_PORTAL_NAME: process.env.YRKA_MCP_PORTAL_NAME ?? "yrka tools (agency gateway)",
+          MCP_SERVER_URL: process.env.YRKA_TOOLS_MCP_URL ?? "https://tools.yrka.io/mcp",
+          MCP_SERVER_NAME: process.env.YRKA_TOOLS_MCP_NAME ?? "tools (agency gateway)",
+          MCP_SERVER_AUTH: "token",
         };
       }
     } else if (pkg.name === "workshop-backend") {
