@@ -356,9 +356,13 @@ export function buildYrkaConfigs({
         // each OS account connects with the user's own Access identity — the one front door.
         // MCP_PORTAL_AUTH/MCP_PORTAL_TOKEN are deliberately NOT set. Set at the config layer
         // 2026-11-26 as part of the MCP consolidation (agency docs/mcp-tool-map.md).
+        // The URL must be the portal's full MCP endpoint, /mcp included: the account code
+        // hands the endpoint to the MCP client verbatim, and the portal serves nothing at
+        // its root — POST initialize to https://mcp.yrka.io/ returns 404 (verified live
+        // 2026-11-27; /mcp reaches the portal's MCP layer and answers 401 pre-auth).
         config.vars = {
           ...config.vars,
-          MCP_PORTAL_URL: process.env.YRKA_MCP_PORTAL_URL ?? "https://mcp.yrka.io",
+          MCP_PORTAL_URL: process.env.YRKA_MCP_PORTAL_URL ?? "https://mcp.yrka.io/mcp",
           MCP_PORTAL_NAME: process.env.YRKA_MCP_PORTAL_NAME ?? "yrka tools (agency gateway)",
         };
       }
